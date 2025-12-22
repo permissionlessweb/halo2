@@ -4,6 +4,9 @@ use crate::{
     poly::{Coeff, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial},
 };
 
+use crate::helpers::CurveRead;
+use std::io;
+
 pub(crate) mod keygen;
 pub(crate) mod prover;
 pub(crate) mod verifier;
@@ -81,4 +84,32 @@ pub(crate) struct ProvingKey<C: CurveAffine> {
     permutations: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
     polys: Vec<Polynomial<C::Scalar, Coeff>>,
     pub(super) cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
+}
+
+impl<C: CurveAffine> VerifyingKey<C> {
+    pub(crate) fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        writer.write_all(&(u32::try_from(self.commitments.len()).unwrap()).to_le_bytes())?;
+        for commitment in &self.commitments {
+            writer.write_all(commitment.to_bytes().as_ref())?;
+        }
+        Ok(())
+    }
+    pub(crate) fn read<R: io::Read>(reader: &mut R, argument: &Argument) -> io::Result<Self> {
+        let mut num_commitments_le_bytes = [0u8; 4];
+        reader.read_exact(&mut num_commitments_le_bytes)?;
+        let num_commitments = u32::from_le_bytes(num_commitments_le_bytes);
+        if argument.columns.len() != num_commitments.try_into().unwrap() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected number of column commitments",
+            ));
+        }
+        let commitments: Vec<_> = (0..argument.columns.len())
+            .map(|_| C::read(reader))
+            .collect::<io::Result<_>>()?;
+        Ok(VerifyingKey { commitments })
+    }
+    pub(crate) fn bytes_length(&self) -> usize {
+        4 + self.commitments.len() * C::default().to_bytes().as_ref().len()
+    }
 }

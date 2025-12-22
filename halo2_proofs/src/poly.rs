@@ -4,6 +4,7 @@
 
 use crate::arithmetic::parallelize;
 use crate::plonk::Assigned;
+// use crate::serde::{SerdeFormat, SerdePrimeField};
 
 use group::ff::{BatchInvert, Field};
 
@@ -298,6 +299,36 @@ impl<F: Field, B: Basis> Mul<F> for Polynomial<F, B> {
         self
     }
 }
+
+// impl<F: SerdePrimeField, B> Polynomial<F, B> {
+//     /// Reads polynomial from buffer using `SerdePrimeField::read`.  
+//     pub(crate) fn read<R: io::Read>(reader: &mut R, format: SerdeFormat) -> io::Result<Self> {
+//         let mut poly_len = [0u8; 4];
+//         reader.read_exact(&mut poly_len)?;
+//         let poly_len = u32::from_be_bytes(poly_len);
+
+//         (0..poly_len)
+//             .map(|_| F::read(reader, format))
+//             .collect::<io::Result<Vec<_>>>()
+//             .map(|values| Self {
+//                 values,
+//                 _marker: PhantomData,
+//             })
+//     }
+
+//     /// Writes polynomial to buffer using `SerdePrimeField::write`.  
+//     pub(crate) fn write<W: io::Write>(
+//         &self,
+//         writer: &mut W,
+//         format: SerdeFormat,
+//     ) -> io::Result<()> {
+//         writer.write_all(&(self.values.len() as u32).to_be_bytes())?;
+//         for value in self.values.iter() {
+//             value.write(writer, format)?;
+//         }
+//         Ok(())
+//     }
+// }
 
 /// Describes the relative rotation of a vector. Negative numbers represent
 /// reverse (leftmost) rotations and positive numbers represent forward (rightmost)
