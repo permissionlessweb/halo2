@@ -185,15 +185,36 @@ impl<C: CurveAffine> Params<C> {
         let mut k = [0u8; 4];
         reader.read_exact(&mut k[..])?;
         let k = u32::from_le_bytes(k);
+        eprintln!("Read k value: {} (0x{:08x})", k, k);
+
+        // Validate k before shifting
+        if k >= 64 {
+            return Err(io::Error::new(
+              io::ErrorKind::InvalidData,
+              format!("Invalid k value: {} (must be < 64). This likely means params data is corrupted or reader is at wrong position", k),
+          ));
+        }
 
         let n: u64 = 1 << k;
+        eprintln!("Calculated n: {} (2^{})", n, k);
 
+        eprintln!("Reading {} g values...", n);
         let g: Vec<_> = (0..n).map(|_| C::read(reader)).collect::<Result<_, _>>()?;
+        eprintln!("✓ Read g values");
+
+        eprintln!("Reading {} g_lagrange values...", n);
         let g_lagrange: Vec<_> = (0..n).map(|_| C::read(reader)).collect::<Result<_, _>>()?;
+        eprintln!("✓ Read g_lagrange values");
 
+        eprintln!("Reading w...");
         let w = C::read(reader)?;
-        let u = C::read(reader)?;
+        eprintln!("✓ Read w");
 
+        eprintln!("Reading u...");
+        let u = C::read(reader)?;
+        eprintln!("✓ Read u");
+
+        eprintln!("✓ Params deserialization complete");
         Ok(Params {
             k,
             n,

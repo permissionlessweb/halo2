@@ -98,6 +98,10 @@ impl<C: CurveAffine> VerifyingKey<C> {
         let mut num_commitments_le_bytes = [0u8; 4];
         reader.read_exact(&mut num_commitments_le_bytes)?;
         let num_commitments = u32::from_le_bytes(num_commitments_le_bytes);
+        eprintln!("argument.columns.len(): {}", argument.columns.len());
+        eprintln!("num_commitments: {}", num_commitments);
+        eprintln!("argument: {:#?}", argument);
+
         if argument.columns.len() != num_commitments.try_into().unwrap() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,

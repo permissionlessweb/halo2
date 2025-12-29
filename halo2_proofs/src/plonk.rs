@@ -57,8 +57,20 @@ where
 {
     /// Writes a verifying key to a buffer.
     pub fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        eprintln!("🔑 VerifyingKey::write starting...");
+
         // Version byte that will be checked on read.
         writer.write_all(&[0x01])?;
+
+        eprintln!(
+            "write: fixed_commitments.len(): {:#?}",
+            self.fixed_commitments.len()
+        );
+        eprintln!("write: selectors.len(): {:#?}", self.selectors.len());
+        eprintln!(
+            "write: self.permutation.bytes_length(): {:#?}",
+            self.permutation.bytes_length()
+        );
 
         writer.write_all(&(u32::try_from(self.fixed_commitments.len()).unwrap()).to_le_bytes())?;
         for commitment in &self.fixed_commitments {
@@ -82,29 +94,61 @@ where
         reader: &mut R,
         params: &Params<C>,
     ) -> io::Result<Self> {
+        eprintln!("🔑 VerifyingKey::read starting...");
+        // eprintln!("  params.g:  {:#?}", params.g);
+        // eprintln!("  params.g_lagrange:  {:#?}", params.g_lagrange);
+        eprintln!("  params.g.len():  {:#?}", params.g.len());
+        eprintln!("  params.g_lagrange.len():  {:#?}", params.g_lagrange.len());
+        eprintln!("  params.k:  {:#?}", params.k);
+        eprintln!("  params.n:  {:#?}", params.n);
+        eprintln!("  params.u:  {:#?}", params.u);
+        eprintln!("  params.w:  {:#?}", params.w);
         let (domain, cs, _) = keygen::create_domain::<C, ConcreteCircuit>(params);
+
         let mut version_byte = [0u8; 1];
         reader.read_exact(&mut version_byte)?;
+        eprintln!("  version_byte: 0x{:02x}", version_byte[0]);
+
         if 0x01 != version_byte[0] {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "unexpected version byte",
+                format!(
+                    "unexpected version byte: 0x{:02x} (expected 0x01)",
+                    version_byte[0]
+                ),
             ));
         }
 
         let mut num_fixed_columns_le_bytes = [0u8; 4];
         reader.read_exact(&mut num_fixed_columns_le_bytes)?;
         let num_fixed_columns = u32::from_le_bytes(num_fixed_columns_le_bytes);
+        eprintln!("  num_fixed_columns: {}", num_fixed_columns);
 
+        eprintln!(
+            "  Reading {} fixed column commitments...",
+            num_fixed_columns
+        );
         let fixed_commitments: Vec<_> = (0..num_fixed_columns)
-            .map(|_| C::read(reader))
+            .map(|i| {
+                eprintln!(
+                    "    Reading fixed commitment {}/{}",
+                    i + 1,
+                    num_fixed_columns
+                );
+                C::read(reader)
+            })
             .collect::<io::Result<_>>()?;
 
+        eprintln!("  Reading permutation verifying key...");
+        eprintln!("cs: {:#?}", cs);
         let permutation = permutation::VerifyingKey::read(reader, &cs.permutation)?;
-        // read selectors
+
         let mut num_selectors_le_bytes = [0u8; 4];
         reader.read_exact(&mut num_selectors_le_bytes)?;
         let num_selectors = u32::from_le_bytes(num_selectors_le_bytes);
+        eprintln!("  num_selectors: {}", num_selectors);
+        eprintln!("  cs.num_selectors: {}", cs.num_selectors);
+
         if cs.num_selectors != num_selectors.try_into().unwrap() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -125,6 +169,7 @@ where
 
         let (cs, _) = cs.compress_selectors(selectors.clone());
 
+        eprintln!("✓ VerifyingKey::read completed successfully");
         Ok(Self::from_parts(
             domain,
             fixed_commitments,

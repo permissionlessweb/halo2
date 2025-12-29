@@ -33,13 +33,28 @@ where
     C: CurveAffine,
     ConcreteCircuit: Circuit<C::Scalar>,
 {
+    eprintln!("🔄 create_domain called...");
     let mut cs = ConstraintSystem::default();
+    eprintln!(
+        "  Before configure: num_advice={}, num_fixed={}, num_instance={}",
+        cs.num_advice_columns, cs.num_fixed_columns, cs.num_instance_columns
+    );
+
     let config = ConcreteCircuit::configure(&mut cs);
 
+    eprintln!(
+        "  After configure: num_advice={}, num_fixed={}, num_instance={}",
+        cs.num_advice_columns, cs.num_fixed_columns, cs.num_instance_columns
+    );
+    eprintln!(
+        "  Permutation columns: {}",
+        cs.permutation.get_columns().len()
+    );
+
     let degree = cs.degree();
+    eprintln!("  Degree: {}", degree);
 
     let domain = EvaluationDomain::new(degree as u32, params.k);
-
     (domain, cs, config)
 }
 
