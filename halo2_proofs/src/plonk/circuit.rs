@@ -1039,14 +1039,29 @@ impl<F: Field> ConstraintSystem<F> {
             minimum_degree: &self.minimum_degree,
         }
     }
-    /// returns the # of permutations we expect a circuit to have.
+    /// returns the # of instance columns we expect a circuit to have.
     /// used for cosmwasm-vm GenericCircuit deserialization.
-    pub fn get_num_selectors(&self) -> usize {
-        self.num_selectors
+    pub fn get_num_instance_columns(&self) -> u8 {
+        self.num_instance_columns as u8
+    }
+    /// returns the # of fixed columns we expect a circuit to have.
+    /// used for cosmwasm-vm GenericCircuit deserialization.
+    pub fn get_num_fixed_columns(&self) -> u8 {
+        self.num_fixed_columns as u8
+    }
+    /// returns the # of selectors we expect a circuit to have.
+    /// used for cosmwasm-vm GenericCircuit deserialization.
+    pub fn get_num_selectors(&self) -> u32 {
+        self.num_selectors as u32
+    }
+    /// returns the # of advice_queries we expect a circuit to have.
+    /// used for cosmwasm-vm GenericCircuit deserialization.
+    pub fn get_num_advice(&self) -> u8 {
+        self.advice_queries.len() as u8
     }
     /// returns the # of permutations we expect a circuit to have.
     /// used for cosmwasm-vm GenericCircuit deserialization.
-    pub fn permutation_colums(&self) -> Vec<Column<Any>> {
+    pub fn get_permutation_columns(&self) -> Vec<Column<Any>> {
         self.permutation.get_columns()
     }
 
