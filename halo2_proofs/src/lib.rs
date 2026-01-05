@@ -20,4 +20,4 @@ pub mod dev;
 mod helpers;
 
 /// | # of bytes dedicated to pefix in vk bytes for circuit metadata
-pub const COSMWASM_METADATA_LENGTH: usize = 10;
+pub const COSMWASM_METADATA_LENGTH: usize = 32;

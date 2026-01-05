@@ -33,8 +33,13 @@ impl<C: ColumnType> Column<C> {
         Column { index, column_type }
     }
 
+    /// index of this column.
     pub(crate) fn index(&self) -> usize {
         self.index
+    }
+    /// index of this column.
+    pub fn get_index(&self) -> usize {
+        self.index()
     }
 
     /// Type of this column.
@@ -1033,6 +1038,11 @@ impl<F: Field> ConstraintSystem<F> {
             constants: &self.constants,
             minimum_degree: &self.minimum_degree,
         }
+    }
+    /// returns the # of permutations we expect a circuit to have.
+    /// used for cosmwasm-vm GenericCircuit deserialization.
+    pub fn permutation_colums(&self) -> Vec<Column<Any>> {
+        self.permutation.get_columns()
     }
 
     /// Enables this fixed column to be used for global constant assignments.

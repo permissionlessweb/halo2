@@ -78,13 +78,6 @@ pub(crate) struct VerifyingKey<C: CurveAffine> {
     commitments: Vec<C>,
 }
 
-/// The proving key for a single permutation argument.
-#[derive(Clone, Debug)]
-pub(crate) struct ProvingKey<C: CurveAffine> {
-    permutations: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
-    polys: Vec<Polynomial<C::Scalar, Coeff>>,
-    pub(super) cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
-}
 
 impl<C: CurveAffine> VerifyingKey<C> {
     pub(crate) fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
@@ -102,10 +95,15 @@ impl<C: CurveAffine> VerifyingKey<C> {
         eprintln!("num_commitments: {}", num_commitments);
         eprintln!("argument: {:#?}", argument);
 
-        if argument.columns.len() != num_commitments.try_into().unwrap() {
+        let expected = num_commitments as usize;
+        if argument.columns.len() != expected {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "unexpected number of column commitments",
+                format!(
+                    "unexpected number of column commitments: expected {}, got {}",
+                    expected,
+                    argument.columns.len()
+                ),
             ));
         }
         let commitments: Vec<_> = (0..argument.columns.len())
@@ -116,4 +114,13 @@ impl<C: CurveAffine> VerifyingKey<C> {
     pub(crate) fn bytes_length(&self) -> usize {
         4 + self.commitments.len() * C::default().to_bytes().as_ref().len()
     }
+}
+
+
+/// The proving key for a single permutation argument.
+#[derive(Clone, Debug)]
+pub(crate) struct ProvingKey<C: CurveAffine> {
+    permutations: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
+    polys: Vec<Polynomial<C::Scalar, Coeff>>,
+    pub(super) cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
 }
