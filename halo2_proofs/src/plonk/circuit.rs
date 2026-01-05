@@ -1041,6 +1041,11 @@ impl<F: Field> ConstraintSystem<F> {
     }
     /// returns the # of permutations we expect a circuit to have.
     /// used for cosmwasm-vm GenericCircuit deserialization.
+    pub fn get_num_selectors(&self) -> usize {
+        self.num_selectors
+    }
+    /// returns the # of permutations we expect a circuit to have.
+    /// used for cosmwasm-vm GenericCircuit deserialization.
     pub fn permutation_colums(&self) -> Vec<Column<Any>> {
         self.permutation.get_columns()
     }
