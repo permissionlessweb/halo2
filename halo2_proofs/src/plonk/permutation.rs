@@ -70,6 +70,56 @@ impl Argument {
     pub(crate) fn get_columns(&self) -> Vec<Column<Any>> {
         self.columns.clone()
     }
+
+    /// Write permutation argument to binary format.
+    ///
+    /// Format:
+    /// - [num_columns: u16 LE]
+    /// - For each column: [column_type: u8][column_index: u16 LE]
+    pub fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        writer.write_all(&(self.columns.len() as u16).to_le_bytes())?;
+        for column in &self.columns {
+            let (col_type, col_index) = match column.column_type() {
+                Any::Fixed => (0u8, column.index()),
+                Any::Advice => (1u8, column.index()),
+                Any::Instance => (2u8, column.index()),
+            };
+            writer.write_all(&[col_type])?;
+            writer.write_all(&(col_index as u16).to_le_bytes())?;
+        }
+        Ok(())
+    }
+
+    /// Read permutation argument from binary format.
+    pub fn read<R: io::Read>(reader: &mut R) -> io::Result<Self> {
+        let mut len_bytes = [0u8; 2];
+        reader.read_exact(&mut len_bytes)?;
+        let num_columns = u16::from_le_bytes(len_bytes) as usize;
+
+        let mut columns = Vec::with_capacity(num_columns);
+        for _ in 0..num_columns {
+            let mut col_type_byte = [0u8; 1];
+            reader.read_exact(&mut col_type_byte)?;
+            let mut col_index_bytes = [0u8; 2];
+            reader.read_exact(&mut col_index_bytes)?;
+            let col_index = u16::from_le_bytes(col_index_bytes) as usize;
+
+            let column: Column<Any> = match col_type_byte[0] {
+                0 => Column::new(col_index, Any::Fixed),
+                1 => Column::new(col_index, Any::Advice),
+                2 => Column::new(col_index, Any::Instance),
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("Invalid permutation column type: {}", col_type_byte[0]),
+                    ))
+                }
+            };
+            columns.push(column);
+        }
+
+        Ok(Argument { columns })
+    }
 }
 
 /// The verifying key for a single permutation argument.

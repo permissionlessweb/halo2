@@ -195,6 +195,109 @@ where
         Self::read::<_, ConcreteCircuit>(&mut bytes, params)
     }
 
+    /// Reads a verifying key from a buffer using a pre-built constraint system.
+    ///
+    /// This method enables circuit-agnostic verification by using a deserialized
+    /// ConstraintSystem instead of calling Circuit::configure().
+    pub fn read_with_cs<R: io::Read>(
+        reader: &mut R,
+        params: &Params<C>,
+        cs: ConstraintSystem<C::Scalar>,
+        selectors: Vec<Vec<bool>>,
+    ) -> io::Result<Self> {
+        eprintln!("🔑 VerifyingKey::read_with_cs starting...");
+        eprintln!("  params.k: {}", params.k);
+        eprintln!("  cs.num_fixed_columns: {}", cs.num_fixed_columns);
+        eprintln!("  cs.num_advice_columns: {}", cs.num_advice_columns);
+        eprintln!("  cs.num_instance_columns: {}", cs.num_instance_columns);
+        eprintln!("  cs.num_selectors: {}", cs.num_selectors);
+
+        // Create domain from params and CS degree
+        let degree = cs.degree();
+        eprintln!("  cs.degree(): {}", degree);
+        let domain = EvaluationDomain::new(degree as u32, params.k);
+
+        // Read version byte
+        let mut version_byte = [0u8; 1];
+        reader.read_exact(&mut version_byte)?;
+        eprintln!("  version_byte: 0x{:02x}", version_byte[0]);
+
+        if 0x01 != version_byte[0] {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "unexpected version byte: 0x{:02x} (expected 0x01)",
+                    version_byte[0]
+                ),
+            ));
+        }
+
+        // Read fixed commitments
+        let mut num_fixed_columns_le_bytes = [0u8; 4];
+        reader.read_exact(&mut num_fixed_columns_le_bytes)?;
+        let num_fixed_columns = u32::from_le_bytes(num_fixed_columns_le_bytes);
+        eprintln!("  num_fixed_columns from VK: {}", num_fixed_columns);
+
+        let fixed_commitments: Vec<_> = (0..num_fixed_columns)
+            .map(|_| C::read(reader))
+            .collect::<io::Result<_>>()?;
+
+        // Read permutation verifying key
+        eprintln!("  Reading permutation verifying key...");
+        let permutation = permutation::VerifyingKey::read(reader, &cs.permutation)?;
+
+        // Read and validate selectors count
+        let mut num_selectors_le_bytes = [0u8; 4];
+        reader.read_exact(&mut num_selectors_le_bytes)?;
+        let num_selectors = u32::from_le_bytes(num_selectors_le_bytes);
+        eprintln!("  num_selectors from VK: {}", num_selectors);
+
+        if cs.num_selectors != num_selectors as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "selector count mismatch: CS has {}, VK has {}",
+                    cs.num_selectors, num_selectors
+                ),
+            ));
+        }
+
+        // Read selector data from VK (we already have selectors from CS, but validate/merge)
+        let vk_selectors: Vec<Vec<bool>> = vec![vec![false; params.n as usize]; cs.num_selectors]
+            .into_iter()
+            .map(|mut selector| {
+                let mut selector_bytes = vec![0u8; (selector.len() + 7) / 8];
+                reader.read_exact(&mut selector_bytes)?;
+                for (bits, byte) in selector.chunks_mut(8).zip(selector_bytes) {
+                    unpack(byte, bits);
+                }
+                Ok(selector)
+            })
+            .collect::<io::Result<_>>()?;
+
+        // Use the selectors from the VK (they contain the actual assignments)
+        let (cs, _) = cs.compress_selectors(vk_selectors.clone());
+
+        eprintln!("✓ VerifyingKey::read_with_cs completed successfully");
+        Ok(Self::from_parts(
+            domain,
+            fixed_commitments,
+            permutation,
+            cs,
+            vk_selectors,
+        ))
+    }
+
+    /// Reads a verifying key from a slice of bytes using a pre-built constraint system.
+    pub fn from_bytes_with_cs(
+        mut bytes: &[u8],
+        params: &Params<C>,
+        cs: ConstraintSystem<C::Scalar>,
+        selectors: Vec<Vec<bool>>,
+    ) -> io::Result<Self> {
+        Self::read_with_cs(&mut bytes, params, cs, selectors)
+    }
+
     /// Gets the total number of bytes in the serialization of `self`.
     fn bytes_length(&self) -> usize {
         1 + 4

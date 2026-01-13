@@ -1,8 +1,9 @@
 use core::cmp::max;
 use core::ops::{Add, Mul};
-use ff::Field;
+use ff::{Field, PrimeField};
 use std::{
     convert::TryFrom,
+    io,
     ops::{Neg, Sub},
 };
 
@@ -28,7 +29,8 @@ pub struct Column<C: ColumnType> {
 }
 
 impl<C: ColumnType> Column<C> {
-    #[cfg(test)]
+    /// Create a new column with the given index and type.
+    /// Used for constraint system deserialization.
     pub(crate) fn new(index: usize, column_type: C) -> Self {
         Column { index, column_type }
     }
@@ -678,6 +680,205 @@ impl<F: Field> Expression<F> {
     }
 }
 
+// Expression serialization implementation for constraint system persistence
+impl<F: PrimeField> Expression<F> {
+    /// Write expression to binary format using recursive tree serialization.
+    ///
+    /// Tag bytes:
+    /// - 0x00: Constant(F) → [scalar: 32 bytes LE]
+    /// - 0x01: Selector(Selector) → [index: u16 LE][is_simple: u8]
+    /// - 0x02: Fixed(QueryIndex) → [query_index: u16 LE]
+    /// - 0x03: Advice(QueryIndex) → [query_index: u16 LE]
+    /// - 0x04: Instance(QueryIndex) → [query_index: u16 LE]
+    /// - 0x05: Negated(Box<Expr>) → [inner: Expression]
+    /// - 0x06: Sum(Box<Expr>, Box<Expr>) → [left: Expression][right: Expression]
+    /// - 0x07: Product(Box<Expr>, Box<Expr>) → [left: Expression][right: Expression]
+    /// - 0x08: Scaled(Box<Expr>, F) → [inner: Expression][scalar: 32 bytes LE]
+    pub fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        match self {
+            Expression::Constant(f) => {
+                writer.write_all(&[0x00])?;
+                writer.write_all(f.to_repr().as_ref())?;
+            }
+            Expression::Selector(selector) => {
+                writer.write_all(&[0x01])?;
+                writer.write_all(&(selector.0 as u16).to_le_bytes())?;
+                writer.write_all(&[if selector.is_simple() { 1 } else { 0 }])?;
+            }
+            Expression::Fixed(query) => {
+                writer.write_all(&[0x02])?;
+                writer.write_all(&(query.index as u16).to_le_bytes())?;
+            }
+            Expression::Advice(query) => {
+                writer.write_all(&[0x03])?;
+                writer.write_all(&(query.index as u16).to_le_bytes())?;
+            }
+            Expression::Instance(query) => {
+                writer.write_all(&[0x04])?;
+                writer.write_all(&(query.index as u16).to_le_bytes())?;
+            }
+            Expression::Negated(inner) => {
+                writer.write_all(&[0x05])?;
+                inner.write(writer)?;
+            }
+            Expression::Sum(left, right) => {
+                writer.write_all(&[0x06])?;
+                left.write(writer)?;
+                right.write(writer)?;
+            }
+            Expression::Product(left, right) => {
+                writer.write_all(&[0x07])?;
+                left.write(writer)?;
+                right.write(writer)?;
+            }
+            Expression::Scaled(inner, factor) => {
+                writer.write_all(&[0x08])?;
+                inner.write(writer)?;
+                writer.write_all(factor.to_repr().as_ref())?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Read expression from binary format.
+    ///
+    /// Requires the query vectors to reconstruct full query structs from indices.
+    pub fn read<R: io::Read>(
+        reader: &mut R,
+        fixed_queries: &[(Column<Fixed>, Rotation)],
+        advice_queries: &[(Column<Advice>, Rotation)],
+        instance_queries: &[(Column<Instance>, Rotation)],
+    ) -> io::Result<Self> {
+        let mut tag = [0u8; 1];
+        reader.read_exact(&mut tag)?;
+
+        match tag[0] {
+            0x00 => {
+                // Constant
+                let mut repr = F::Repr::default();
+                reader.read_exact(repr.as_mut())?;
+                let f = Option::from(F::from_repr(repr)).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "Invalid field element")
+                })?;
+                Ok(Expression::Constant(f))
+            }
+            0x01 => {
+                // Selector
+                let mut index_bytes = [0u8; 2];
+                reader.read_exact(&mut index_bytes)?;
+                let index = u16::from_le_bytes(index_bytes) as usize;
+                let mut is_simple_byte = [0u8; 1];
+                reader.read_exact(&mut is_simple_byte)?;
+                let is_simple = is_simple_byte[0] != 0;
+                Ok(Expression::Selector(Selector(index, is_simple)))
+            }
+            0x02 => {
+                // Fixed
+                let mut index_bytes = [0u8; 2];
+                reader.read_exact(&mut index_bytes)?;
+                let index = u16::from_le_bytes(index_bytes) as usize;
+                let (column, rotation) = fixed_queries.get(index).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "Fixed query index {} out of bounds (len={})",
+                            index,
+                            fixed_queries.len()
+                        ),
+                    )
+                })?;
+                Ok(Expression::Fixed(FixedQuery {
+                    index,
+                    column_index: column.index(),
+                    rotation: *rotation,
+                }))
+            }
+            0x03 => {
+                // Advice
+                let mut index_bytes = [0u8; 2];
+                reader.read_exact(&mut index_bytes)?;
+                let index = u16::from_le_bytes(index_bytes) as usize;
+                let (column, rotation) = advice_queries.get(index).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "Advice query index {} out of bounds (len={})",
+                            index,
+                            advice_queries.len()
+                        ),
+                    )
+                })?;
+                Ok(Expression::Advice(AdviceQuery {
+                    index,
+                    column_index: column.index(),
+                    rotation: *rotation,
+                }))
+            }
+            0x04 => {
+                // Instance
+                let mut index_bytes = [0u8; 2];
+                reader.read_exact(&mut index_bytes)?;
+                let index = u16::from_le_bytes(index_bytes) as usize;
+                let (column, rotation) = instance_queries.get(index).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "Instance query index {} out of bounds (len={})",
+                            index,
+                            instance_queries.len()
+                        ),
+                    )
+                })?;
+                Ok(Expression::Instance(InstanceQuery {
+                    index,
+                    column_index: column.index(),
+                    rotation: *rotation,
+                }))
+            }
+            0x05 => {
+                // Negated
+                let inner =
+                    Expression::read(reader, fixed_queries, advice_queries, instance_queries)?;
+                Ok(Expression::Negated(Box::new(inner)))
+            }
+            0x06 => {
+                // Sum
+                let left =
+                    Expression::read(reader, fixed_queries, advice_queries, instance_queries)?;
+                let right =
+                    Expression::read(reader, fixed_queries, advice_queries, instance_queries)?;
+                Ok(Expression::Sum(Box::new(left), Box::new(right)))
+            }
+            0x07 => {
+                // Product
+                let left =
+                    Expression::read(reader, fixed_queries, advice_queries, instance_queries)?;
+                let right =
+                    Expression::read(reader, fixed_queries, advice_queries, instance_queries)?;
+                Ok(Expression::Product(Box::new(left), Box::new(right)))
+            }
+            0x08 => {
+                // Scaled
+                let inner =
+                    Expression::read(reader, fixed_queries, advice_queries, instance_queries)?;
+                let mut repr = F::Repr::default();
+                reader.read_exact(repr.as_mut())?;
+                let factor = Option::from(F::from_repr(repr)).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Invalid field element in Scaled",
+                    )
+                })?;
+                Ok(Expression::Scaled(Box::new(inner), factor))
+            }
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Invalid expression tag: 0x{:02x}", tag[0]),
+            )),
+        }
+    }
+}
+
 impl<F: std::fmt::Debug> std::fmt::Debug for Expression<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -933,6 +1134,162 @@ impl<F: Field> Gate<F> {
     }
 }
 
+// Gate serialization implementation
+impl<F: PrimeField> Gate<F> {
+    /// Write gate to binary format.
+    ///
+    /// Format:
+    /// - [name_len: u16 LE][name: UTF-8 bytes]
+    /// - [num_constraints: u16 LE]
+    /// - For each constraint: [name_len: u16 LE][name: UTF-8 bytes][expression: Expression]
+    /// - [num_queried_selectors: u16 LE]
+    /// - For each selector: [index: u16 LE][is_simple: u8]
+    /// - [num_queried_cells: u16 LE]
+    /// - For each cell: [column_type: u8][column_index: u16 LE][rotation: i32 LE]
+    pub fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        // Write gate name
+        let name_bytes = self.name.as_bytes();
+        writer.write_all(&(name_bytes.len() as u16).to_le_bytes())?;
+        writer.write_all(name_bytes)?;
+
+        // Write constraints (name + expression pairs)
+        writer.write_all(&(self.polys.len() as u16).to_le_bytes())?;
+        for (i, poly) in self.polys.iter().enumerate() {
+            let constraint_name = self.constraint_names.get(i).copied().unwrap_or("");
+            let name_bytes = constraint_name.as_bytes();
+            writer.write_all(&(name_bytes.len() as u16).to_le_bytes())?;
+            writer.write_all(name_bytes)?;
+            poly.write(writer)?;
+        }
+
+        // Write queried selectors
+        writer.write_all(&(self.queried_selectors.len() as u16).to_le_bytes())?;
+        for selector in &self.queried_selectors {
+            writer.write_all(&(selector.0 as u16).to_le_bytes())?;
+            writer.write_all(&[if selector.is_simple() { 1 } else { 0 }])?;
+        }
+
+        // Write queried cells (VirtualCell)
+        writer.write_all(&(self.queried_cells.len() as u16).to_le_bytes())?;
+        for cell in &self.queried_cells {
+            // Column type: 0=Fixed, 1=Advice, 2=Instance
+            let (col_type, col_index) = match cell.column.column_type() {
+                Any::Fixed => (0u8, cell.column.index()),
+                Any::Advice => (1u8, cell.column.index()),
+                Any::Instance => (2u8, cell.column.index()),
+            };
+            writer.write_all(&[col_type])?;
+            writer.write_all(&(col_index as u16).to_le_bytes())?;
+            writer.write_all(&cell.rotation.0.to_le_bytes())?;
+        }
+
+        Ok(())
+    }
+
+    /// Read gate from binary format.
+    ///
+    /// Note: This leaks the name strings to create &'static str references.
+    /// This is acceptable for verification contexts where gates are loaded once.
+    pub fn read<R: io::Read>(
+        reader: &mut R,
+        fixed_queries: &[(Column<Fixed>, Rotation)],
+        advice_queries: &[(Column<Advice>, Rotation)],
+        instance_queries: &[(Column<Instance>, Rotation)],
+    ) -> io::Result<Self> {
+        // Read gate name
+        let name_len = read_u16(reader)? as usize;
+        let mut name_bytes = vec![0u8; name_len];
+        reader.read_exact(&mut name_bytes)?;
+        let name_string = String::from_utf8(name_bytes)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        // Leak the string to get &'static str
+        let name: &'static str = Box::leak(name_string.into_boxed_str());
+
+        // Read constraints
+        let num_constraints = read_u16(reader)? as usize;
+        let mut constraint_names = Vec::with_capacity(num_constraints);
+        let mut polys = Vec::with_capacity(num_constraints);
+        for _ in 0..num_constraints {
+            // Read constraint name
+            let cname_len = read_u16(reader)? as usize;
+            let mut cname_bytes = vec![0u8; cname_len];
+            reader.read_exact(&mut cname_bytes)?;
+            let cname_string = String::from_utf8(cname_bytes)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let cname: &'static str = Box::leak(cname_string.into_boxed_str());
+            constraint_names.push(cname);
+
+            // Read expression
+            let expr = Expression::read(reader, fixed_queries, advice_queries, instance_queries)?;
+            polys.push(expr);
+        }
+
+        // Read queried selectors
+        let num_selectors = read_u16(reader)? as usize;
+        let mut queried_selectors = Vec::with_capacity(num_selectors);
+        for _ in 0..num_selectors {
+            let index = read_u16(reader)? as usize;
+            let is_simple = read_u8(reader)? != 0;
+            queried_selectors.push(Selector(index, is_simple));
+        }
+
+        // Read queried cells
+        let num_cells = read_u16(reader)? as usize;
+        let mut queried_cells = Vec::with_capacity(num_cells);
+        for _ in 0..num_cells {
+            let col_type = read_u8(reader)?;
+            let col_index = read_u16(reader)? as usize;
+            let rotation = Rotation(read_i32(reader)?);
+
+            let column: Column<Any> = match col_type {
+                0 => Column::new(col_index, Any::Fixed),
+                1 => Column::new(col_index, Any::Advice),
+                2 => Column::new(col_index, Any::Instance),
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("Invalid column type: {}", col_type),
+                    ))
+                }
+            };
+            queried_cells.push(VirtualCell { column, rotation });
+        }
+
+        Ok(Gate {
+            name,
+            constraint_names,
+            polys,
+            queried_selectors,
+            queried_cells,
+        })
+    }
+}
+
+// Helper functions for binary serialization
+fn read_u8<R: io::Read>(reader: &mut R) -> io::Result<u8> {
+    let mut buf = [0u8; 1];
+    reader.read_exact(&mut buf)?;
+    Ok(buf[0])
+}
+
+fn read_u16<R: io::Read>(reader: &mut R) -> io::Result<u16> {
+    let mut buf = [0u8; 2];
+    reader.read_exact(&mut buf)?;
+    Ok(u16::from_le_bytes(buf))
+}
+
+fn read_u32<R: io::Read>(reader: &mut R) -> io::Result<u32> {
+    let mut buf = [0u8; 4];
+    reader.read_exact(&mut buf)?;
+    Ok(u32::from_le_bytes(buf))
+}
+
+fn read_i32<R: io::Read>(reader: &mut R) -> io::Result<i32> {
+    let mut buf = [0u8; 4];
+    reader.read_exact(&mut buf)?;
+    Ok(i32::from_le_bytes(buf))
+}
+
 /// This is a description of the circuit environment, such as the gate, column and
 /// permutation arrangements.
 #[derive(Debug, Clone)]
@@ -1063,6 +1420,11 @@ impl<F: Field> ConstraintSystem<F> {
     /// used for cosmwasm-vm GenericCircuit deserialization.
     pub fn get_permutation_columns(&self) -> Vec<Column<Any>> {
         self.permutation.get_columns()
+    }
+    /// returns the # of gates a circuit has.
+    /// used for cosmwasm-vm GenericCircuit deserialization.
+    pub fn get_gate_count(&self) -> usize {
+        self.gates.len()
     }
 
     /// Enables this fixed column to be used for global constant assignments.
@@ -1499,6 +1861,207 @@ impl<F: Field> ConstraintSystem<F> {
                 // permutation polynomial between the roles of l_last, l_0
                 // and the interstitial values.)
             + 1 // for at least one row
+    }
+}
+
+// ConstraintSystem serialization for circuit-agnostic verification
+impl<F: PrimeField> ConstraintSystem<F> {
+    /// Write constraint system to binary format.
+    ///
+    /// Format (Version 2):
+    /// - CS Header (16 bytes): column counts, selector count, gate count
+    /// - Selector map
+    /// - Queries (advice, instance, fixed) - must come before gates for deserialization
+    /// - num_advice_queries (per-column query counts)
+    /// - Gates with polynomial expressions
+    /// - Permutation argument columns
+    /// - Lookup arguments
+    /// - Constant columns
+    /// - Minimum degree
+    pub fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        // CS Header (16 bytes)
+        writer.write_all(&(self.num_fixed_columns as u32).to_le_bytes())?;
+        writer.write_all(&(self.num_advice_columns as u32).to_le_bytes())?;
+        writer.write_all(&(self.num_instance_columns as u32).to_le_bytes())?;
+        writer.write_all(&(self.num_selectors as u16).to_le_bytes())?;
+        writer.write_all(&(self.gates.len() as u16).to_le_bytes())?;
+
+        // Selector map: maps selectors to fixed column indices
+        writer.write_all(&(self.selector_map.len() as u16).to_le_bytes())?;
+        for column in &self.selector_map {
+            writer.write_all(&(column.index() as u16).to_le_bytes())?;
+        }
+
+        // Queries must come before gates (needed for Expression deserialization)
+        // Fixed queries
+        writer.write_all(&(self.fixed_queries.len() as u16).to_le_bytes())?;
+        for (column, rotation) in &self.fixed_queries {
+            writer.write_all(&(column.index() as u16).to_le_bytes())?;
+            writer.write_all(&rotation.0.to_le_bytes())?;
+        }
+
+        // Advice queries
+        writer.write_all(&(self.advice_queries.len() as u16).to_le_bytes())?;
+        for (column, rotation) in &self.advice_queries {
+            writer.write_all(&(column.index() as u16).to_le_bytes())?;
+            writer.write_all(&rotation.0.to_le_bytes())?;
+        }
+
+        // Instance queries
+        writer.write_all(&(self.instance_queries.len() as u16).to_le_bytes())?;
+        for (column, rotation) in &self.instance_queries {
+            writer.write_all(&(column.index() as u16).to_le_bytes())?;
+            writer.write_all(&rotation.0.to_le_bytes())?;
+        }
+
+        // num_advice_queries (per-column query counts)
+        writer.write_all(&(self.num_advice_queries.len() as u16).to_le_bytes())?;
+        for &count in &self.num_advice_queries {
+            writer.write_all(&(count as u16).to_le_bytes())?;
+        }
+
+        // Gates (after queries so Expression::read can access them)
+        writer.write_all(&(self.gates.len() as u16).to_le_bytes())?;
+        for gate in &self.gates {
+            gate.write(writer)?;
+        }
+
+        // Permutation argument
+        self.permutation.write(writer)?;
+
+        // Lookups
+        writer.write_all(&(self.lookups.len() as u16).to_le_bytes())?;
+        for lookup in &self.lookups {
+            lookup.write(writer)?;
+        }
+
+        // Constants (fixed columns used for constants)
+        writer.write_all(&(self.constants.len() as u16).to_le_bytes())?;
+        for column in &self.constants {
+            writer.write_all(&(column.index() as u16).to_le_bytes())?;
+        }
+
+        // Minimum degree
+        match &self.minimum_degree {
+            Some(degree) => {
+                writer.write_all(&[1])?;
+                writer.write_all(&(*degree as u32).to_le_bytes())?;
+            }
+            None => {
+                writer.write_all(&[0])?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Read constraint system from binary format.
+    pub fn read<R: io::Read>(reader: &mut R) -> io::Result<Self> {
+        // CS Header (16 bytes)
+        let num_fixed_columns = read_u32(reader)? as usize;
+        let num_advice_columns = read_u32(reader)? as usize;
+        let num_instance_columns = read_u32(reader)? as usize;
+        let num_selectors = read_u16(reader)? as usize;
+        let _num_gates_header = read_u16(reader)? as usize;
+
+        // Selector map
+        let selector_map_len = read_u16(reader)? as usize;
+        let mut selector_map = Vec::with_capacity(selector_map_len);
+        for _ in 0..selector_map_len {
+            let col_index = read_u16(reader)? as usize;
+            selector_map.push(Column::new(col_index, Fixed));
+        }
+
+        // Fixed queries (read before gates)
+        let fixed_queries_len = read_u16(reader)? as usize;
+        let mut fixed_queries = Vec::with_capacity(fixed_queries_len);
+        for _ in 0..fixed_queries_len {
+            let col_index = read_u16(reader)? as usize;
+            let rotation = Rotation(read_i32(reader)?);
+            fixed_queries.push((Column::new(col_index, Fixed), rotation));
+        }
+
+        // Advice queries
+        let advice_queries_len = read_u16(reader)? as usize;
+        let mut advice_queries = Vec::with_capacity(advice_queries_len);
+        for _ in 0..advice_queries_len {
+            let col_index = read_u16(reader)? as usize;
+            let rotation = Rotation(read_i32(reader)?);
+            advice_queries.push((Column::new(col_index, Advice), rotation));
+        }
+
+        // Instance queries
+        let instance_queries_len = read_u16(reader)? as usize;
+        let mut instance_queries = Vec::with_capacity(instance_queries_len);
+        for _ in 0..instance_queries_len {
+            let col_index = read_u16(reader)? as usize;
+            let rotation = Rotation(read_i32(reader)?);
+            instance_queries.push((Column::new(col_index, Instance), rotation));
+        }
+
+        // num_advice_queries (per-column query counts)
+        let num_advice_queries_len = read_u16(reader)? as usize;
+        let mut num_advice_queries = Vec::with_capacity(num_advice_queries_len);
+        for _ in 0..num_advice_queries_len {
+            num_advice_queries.push(read_u16(reader)? as usize);
+        }
+
+        // Gates (now we have queries available)
+        let num_gates = read_u16(reader)? as usize;
+        let mut gates = Vec::with_capacity(num_gates);
+        for _ in 0..num_gates {
+            let gate = Gate::read(reader, &fixed_queries, &advice_queries, &instance_queries)?;
+            gates.push(gate);
+        }
+
+        // Permutation argument
+        let permutation = permutation::Argument::read(reader)?;
+
+        // Lookups
+        let num_lookups = read_u16(reader)? as usize;
+        let mut lookups = Vec::with_capacity(num_lookups);
+        for _ in 0..num_lookups {
+            let lookup =
+                lookup::Argument::read(reader, &fixed_queries, &advice_queries, &instance_queries)?;
+            lookups.push(lookup);
+        }
+
+        // Constants
+        let num_constants = read_u16(reader)? as usize;
+        let mut constants = Vec::with_capacity(num_constants);
+        for _ in 0..num_constants {
+            let col_index = read_u16(reader)? as usize;
+            constants.push(Column::new(col_index, Fixed));
+        }
+
+        // Minimum degree
+        let minimum_degree = match read_u8(reader)? {
+            0 => None,
+            1 => Some(read_u32(reader)? as usize),
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Invalid minimum_degree flag",
+                ))
+            }
+        };
+
+        Ok(ConstraintSystem {
+            num_fixed_columns,
+            num_advice_columns,
+            num_instance_columns,
+            num_selectors,
+            selector_map,
+            gates,
+            advice_queries,
+            num_advice_queries,
+            instance_queries,
+            fixed_queries,
+            permutation,
+            lookups,
+            constants,
+            minimum_degree,
+        })
     }
 }
 
