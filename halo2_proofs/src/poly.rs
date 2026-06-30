@@ -302,7 +302,7 @@ impl<F: Field, B: Basis> Mul<F> for Polynomial<F, B> {
 
 // impl<F: SerdePrimeField, B> Polynomial<F, B> {
 //     /// Reads polynomial from buffer using `SerdePrimeField::read`.  
-//     pub(crate) fn read<R: io::Read>(reader: &mut R, format: SerdeFormat) -> io::Result<Self> {
+//     pub(crate) fn read<R: std::io::Read>(reader: &mut R, format: SerdeFormat) -> std::io::Result<Self> {
 //         let mut poly_len = [0u8; 4];
 //         reader.read_exact(&mut poly_len)?;
 //         let poly_len = u32::from_be_bytes(poly_len);
@@ -317,11 +317,11 @@ impl<F: Field, B: Basis> Mul<F> for Polynomial<F, B> {
 //     }
 
 //     /// Writes polynomial to buffer using `SerdePrimeField::write`.  
-//     pub(crate) fn write<W: io::Write>(
+//     pub(crate) fn write<W: std::io::Write>(
 //         &self,
 //         writer: &mut W,
 //         format: SerdeFormat,
-//     ) -> io::Result<()> {
+//     ) -> std::io::Result<()> {
 //         writer.write_all(&(self.values.len() as u32).to_be_bytes())?;
 //         for value in self.values.iter() {
 //             value.write(writer, format)?;

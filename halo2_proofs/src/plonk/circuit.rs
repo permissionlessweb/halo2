@@ -1345,6 +1345,7 @@ pub struct PinnedConstraintSystem<'a, F: Field> {
     minimum_degree: &'a Option<usize>,
 }
 
+
 struct PinnedGates<'a, F: Field>(&'a Vec<Gate<F>>);
 
 impl<'a, F: Field> std::fmt::Debug for PinnedGates<'a, F> {
@@ -1396,6 +1397,7 @@ impl<F: Field> ConstraintSystem<F> {
             minimum_degree: &self.minimum_degree,
         }
     }
+
     /// returns the # of instance columns we expect a circuit to have.
     /// used for cosmwasm-vm GenericCircuit deserialization.
     pub fn get_num_instance_columns(&self) -> u8 {
@@ -1421,6 +1423,18 @@ impl<F: Field> ConstraintSystem<F> {
     pub fn get_permutation_columns(&self) -> Vec<Column<Any>> {
         self.permutation.get_columns()
     }
+    /// returns the # of advice columns in the constraint system.
+    /// used for cosmwasm-vm footer generation.
+    pub fn get_num_advice_columns(&self) -> u8 {
+        self.num_advice_columns as u8
+    }
+
+    /// returns whether the circuit contains lookup arguments.
+    /// used for cosmwasm-vm footer generation.
+    pub fn has_lookups(&self) -> bool {
+        !self.lookups.is_empty()
+    }
+
     /// returns the # of gates a circuit has.
     /// used for cosmwasm-vm GenericCircuit deserialization.
     pub fn get_gate_count(&self) -> usize {
@@ -1866,18 +1880,56 @@ impl<F: Field> ConstraintSystem<F> {
 
 // ConstraintSystem serialization for circuit-agnostic verification
 impl<F: PrimeField> ConstraintSystem<F> {
-    /// Write constraint system to binary format.
-    ///
-    /// Format (Version 2):
-    /// - CS Header (16 bytes): column counts, selector count, gate count
-    /// - Selector map
-    /// - Queries (advice, instance, fixed) - must come before gates for deserialization
-    /// - num_advice_queries (per-column query counts)
-    /// - Gates with polynomial expressions
-    /// - Permutation argument columns
-    /// - Lookup arguments
-    /// - Constant columns
-    /// - Minimum degree
+    /// Header (16 bytes)
+    /// 0..4    u32   num_fixed_columns
+    /// 4..8    u32   num_advice_columns
+    /// 8..12   u32   num_instance_columns
+    /// 12..14  u16   num_selectors
+    /// 14..16  u16   num_gates (header)
+
+    /// Selector map
+    /// 16..18  u16   selector_map_len
+    /// 18..    u16[] selector_map (column indices)
+
+    /// Fixed queries
+    /// ..      u16   fixed_queries_len
+    /// ..      u16   fixed_query.column_index (repeated)
+    /// ..      i32   fixed_query.rotation (repeated)
+
+    /// Advice queries
+    /// ..      u16   advice_queries_len
+    /// ..      u16   advice_query.column_index (repeated)
+    /// ..      i32   advice_query.rotation (repeated)
+
+    /// Instance queries
+    /// ..      u16   instance_queries_len
+    /// ..      u16   instance_query.column_index (repeated)
+    /// ..      i32   instance_query.rotation (repeated)
+
+    /// num_advice_queries
+    /// ..      u16   num_advice_queries_len
+    /// ..      u16[] num_advice_queries (counts per column)
+
+    /// Gates
+    /// ..      u16   gates_len
+    /// ..      Gate  gates (repeated)
+
+    /// Permutation argument
+    /// ..      u16   permutation_columns_len
+    /// ..      u8    permutation_column_type (repeated)
+    /// ..      u16   permutation_column_index (repeated)
+
+    /// Lookups
+    /// ..      u16   lookups_len
+    /// ..      Lookup lookups (repeated)
+
+    /// Constants
+    /// ..      u16   constants_len
+    /// ..      u16[] constants (column indices)
+
+    /// Minimum degree
+    /// ..      u8    minimum_degree_flag (0=None, 1=Some)
+    /// ..      u32   minimum_degree (if flag=1)
     pub fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
         // CS Header (16 bytes)
         writer.write_all(&(self.num_fixed_columns as u32).to_le_bytes())?;
@@ -1964,6 +2016,17 @@ impl<F: PrimeField> ConstraintSystem<F> {
         let num_selectors = read_u16(reader)? as usize;
         let _num_gates_header = read_u16(reader)? as usize;
 
+        println!(
+            "{:#?}",
+            (
+                num_fixed_columns,
+                num_advice_columns,
+                num_instance_columns,
+                num_selectors,
+                _num_gates_header
+            )
+        );
+
         // Selector map
         let selector_map_len = read_u16(reader)? as usize;
         let mut selector_map = Vec::with_capacity(selector_map_len);
@@ -1974,6 +2037,7 @@ impl<F: PrimeField> ConstraintSystem<F> {
 
         // Fixed queries (read before gates)
         let fixed_queries_len = read_u16(reader)? as usize;
+        println!("{:#?}", (selector_map_len, fixed_queries_len));
         let mut fixed_queries = Vec::with_capacity(fixed_queries_len);
         for _ in 0..fixed_queries_len {
             let col_index = read_u16(reader)? as usize;

@@ -165,12 +165,14 @@ impl<C: CurveAffine> Params<C> {
         self.k
     }
 
-    /// Writes params to a buffer.
+    /// Writes params to a buffer with explicit length prefixes for arrays.
     pub fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
         writer.write_all(&self.k.to_le_bytes())?;
+        writer.write_all(&(self.g.len() as u32).to_le_bytes())?;
         for g_element in &self.g {
             writer.write_all(g_element.to_bytes().as_ref())?;
         }
+        writer.write_all(&(self.g_lagrange.len() as u32).to_le_bytes())?;
         for g_lagrange_element in &self.g_lagrange {
             writer.write_all(g_lagrange_element.to_bytes().as_ref())?;
         }
@@ -182,39 +184,54 @@ impl<C: CurveAffine> Params<C> {
 
     /// Reads params from a buffer.
     pub fn read<R: io::Read>(reader: &mut R) -> io::Result<Self> {
-        let mut k = [0u8; 4];
-        reader.read_exact(&mut k[..])?;
-        let k = u32::from_le_bytes(k);
-        eprintln!("Read k value: {} (0x{:08x})", k, k);
+        // Read k
+        let mut k_bytes = [0u8; 4];
+        reader.read_exact(&mut k_bytes)?;
+        let k = u32::from_le_bytes(k_bytes);
 
-        // Validate k before shifting
         if k >= 64 {
             return Err(io::Error::new(
-              io::ErrorKind::InvalidData,
-              format!("Invalid k value: {} (must be < 64). This likely means params data is corrupted or reader is at wrong position", k),
-          ));
+                io::ErrorKind::InvalidData,
+                format!("Invalid k value: {} (must be < 64)", k),
+            ));
+        }
+        let n = 1u64 << k;
+
+        // Read g with length prefix
+        let mut g_len_bytes = [0u8; 4];
+        reader.read_exact(&mut g_len_bytes)?;
+        let g_len = u32::from_le_bytes(g_len_bytes) as usize;
+
+        if g_len != n as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("g length mismatch: expected {}, got {}", n, g_len),
+            ));
         }
 
-        let n: u64 = 1 << k;
-        eprintln!("Calculated n: {} (2^{})", n, k);
+        let g: Vec<C> = (0..g_len)
+            .map(|_| C::read(reader))
+            .collect::<Result<_, _>>()?;
 
-        eprintln!("Reading {} g values...", n);
-        let g: Vec<_> = (0..n).map(|_| C::read(reader)).collect::<Result<_, _>>()?;
-        eprintln!("✓ Read g values");
+        let mut gl_len_bytes = [0u8; 4];
+        reader.read_exact(&mut gl_len_bytes)?;
+        let gl_len = u32::from_le_bytes(gl_len_bytes) as usize;
 
-        eprintln!("Reading {} g_lagrange values...", n);
-        let g_lagrange: Vec<_> = (0..n).map(|_| C::read(reader)).collect::<Result<_, _>>()?;
-        eprintln!("✓ Read g_lagrange values");
+        if gl_len != n as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("g_lagrange length mismatch: expected {}, got {}", n, gl_len),
+            ));
+        }
 
-        eprintln!("Reading w...");
+        let g_lagrange: Vec<C> = (0..gl_len)
+            .map(|_| C::read(reader))
+            .collect::<Result<_, _>>()?;
+
+        // w and u
         let w = C::read(reader)?;
-        eprintln!("✓ Read w");
-
-        eprintln!("Reading u...");
         let u = C::read(reader)?;
-        eprintln!("✓ Read u");
 
-        eprintln!("✓ Params deserialization complete");
         Ok(Params {
             k,
             n,

@@ -128,8 +128,16 @@ pub(crate) struct VerifyingKey<C: CurveAffine> {
     commitments: Vec<C>,
 }
 
-
 impl<C: CurveAffine> VerifyingKey<C> {
+    ///
+    /// ```text
+    /// +-------------------+-----------------------------+
+    /// | Field             | Size / Description          |
+    /// +-------------------+-----------------------------+
+    /// | num_commitments   | u32 LE                      |
+    /// | commitments       | num_commitments × C::G1     |
+    /// +-------------------+-----------------------------+
+    /// ```
     pub(crate) fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
         writer.write_all(&(u32::try_from(self.commitments.len()).unwrap()).to_le_bytes())?;
         for commitment in &self.commitments {
@@ -141,10 +149,6 @@ impl<C: CurveAffine> VerifyingKey<C> {
         let mut num_commitments_le_bytes = [0u8; 4];
         reader.read_exact(&mut num_commitments_le_bytes)?;
         let num_commitments = u32::from_le_bytes(num_commitments_le_bytes);
-        eprintln!("argument.columns.len(): {}", argument.columns.len());
-        eprintln!("num_commitments: {}", num_commitments);
-        eprintln!("argument: {:#?}", argument);
-
         let expected = num_commitments as usize;
         if argument.columns.len() != expected {
             return Err(io::Error::new(
@@ -165,7 +169,6 @@ impl<C: CurveAffine> VerifyingKey<C> {
         4 + self.commitments.len() * C::default().to_bytes().as_ref().len()
     }
 }
-
 
 /// The proving key for a single permutation argument.
 #[derive(Clone, Debug)]

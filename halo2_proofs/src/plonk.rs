@@ -55,147 +55,99 @@ impl<C: CurveAffine> VerifyingKey<C>
 where
     C::Scalar: FromUniformBytes<64>,
 {
-    /// Writes a verifying key to a buffer.
+    /// Serialized format of a [`VerifyingKey<C>`] (Zcash-style binary serialization)
+    ///
+    /// The format is as follows (all multi-byte integers are **little-endian**):
+    ///
+    /// ```text
+    /// +-------------------+--------------------------+
+    /// | Field             | Size / Description       |
+    /// +-------------------+--------------------------+
+    /// | version           | 1 byte  (always 0x01)    |
+    /// | num_fixed_columns | u32 LE                   |
+    /// | fixed_commitments | num_fixed_columns × C::G1 (compressed) |
+    /// | permutation_vk    | variable (see permutation::VerifyingKey::write) |
+    /// | num_selectors     | u32 LE                   |
+    /// | selectors         | variable (bit-packed)    |
+    /// +-------------------+--------------------------+
     pub fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
-        eprintln!("🔑 VerifyingKey::write starting...");
+        let mut vk_buf = Vec::new();
+        vk_buf.extend_from_slice(&[0x01]);
 
-        // Version byte that will be checked on read.
-        writer.write_all(&[0x01])?;
-
-        eprintln!(
-            "write: fixed_commitments.len(): {:#?}",
-            self.fixed_commitments.len()
-        );
-        eprintln!("write: selectors.len(): {:#?}", self.selectors.len());
-        eprintln!(
-            "write: self.permutation.bytes_length(): {:#?}",
-            self.permutation.bytes_length()
+        // normal vk serialization and write spec
+        let mut fixed_commitments_buf = Vec::with_capacity(self.fixed_commitments.len());
+        fixed_commitments_buf.extend_from_slice(
+            &(u32::try_from(self.fixed_commitments.len()).unwrap()).to_le_bytes(),
         );
 
-        writer.write_all(&(u32::try_from(self.fixed_commitments.len()).unwrap()).to_le_bytes())?;
         for commitment in &self.fixed_commitments {
-            writer.write_all(commitment.to_bytes().as_ref())?;
+            fixed_commitments_buf.extend_from_slice(commitment.to_bytes().as_ref());
         }
-        self.permutation.write(writer)?;
+        let fixed_commitments_checksum =
+            hex::encode(&<sha2::Sha256 as sha2::Digest>::digest(&fixed_commitments_buf).to_vec());
+        println!(
+            "halo2::write::vk::fixed_commitments::(checksum::{},length::{}) ",
+            fixed_commitments_checksum,
+            fixed_commitments_buf.len()
+        );
 
-        writer.write_all(&(u32::try_from(self.selectors.len()).unwrap()).to_le_bytes())?;
+        vk_buf.extend_from_slice(&fixed_commitments_buf);
+
+        let mut permutation_buf = Vec::new();
+        self.permutation.write(&mut permutation_buf)?;
+        let permutation_checksum =
+            hex::encode(&<sha2::Sha256 as sha2::Digest>::digest(&permutation_buf).to_vec());
+
+        println!(
+            "halo2::write::vk::permutation::(checksum::{},len::{})",
+            permutation_checksum,
+            permutation_buf.len()
+        );
+
+        vk_buf.extend_from_slice(&permutation_buf);
+
+        let mut selectors_buf = Vec::new();
+        selectors_buf
+            .extend_from_slice(&(u32::try_from(self.selectors.len()).unwrap()).to_le_bytes());
+
         for selector in &self.selectors {
-            // since `selector` is filled with `bool`, we pack them 8 at a time into bytes and then write
             for bits in selector.chunks(8) {
-                writer.write_all(&[pack(bits)])?;
+                // pack 8 at a time into bytes and then write
+                selectors_buf.extend_from_slice(&[pack(bits)]);
             }
         }
+
+        let selectors_checksum =
+            hex::encode(&<sha2::Sha256 as sha2::Digest>::digest(&selectors_buf).to_vec());
+        println!(
+            "halo2::write::vk::selectors::(checksum::{},length::{})",
+            selectors_checksum,
+            selectors_buf.len()
+        );
+
+        vk_buf.extend_from_slice(&selectors_buf);
+        let vk_checksum = hex::encode(&<sha2::Sha256 as sha2::Digest>::digest(&vk_buf).to_vec());
+        println!(
+            "halo2::write::vk::(checksum::{},length::{})",
+            vk_checksum,
+            vk_buf.len()
+        );
+
+        writer.write_all(&vk_buf)?;
 
         Ok(())
     }
 
-    /// Reads a verifying key from a buffer.
-    pub fn read<R: io::Read, ConcreteCircuit: Circuit<C::Scalar>>(
-        reader: &mut R,
-        params: &Params<C>,
-    ) -> io::Result<Self> {
-        eprintln!("🔑 VerifyingKey::read starting...");
-        // eprintln!("  params.g:  {:#?}", params.g);
-        // eprintln!("  params.g_lagrange:  {:#?}", params.g_lagrange);
-        eprintln!("  params.g.len():  {:#?}", params.g.len());
-        eprintln!("  params.g_lagrange.len():  {:#?}", params.g_lagrange.len());
-        eprintln!("  params.k:  {:#?}", params.k);
-        eprintln!("  params.n:  {:#?}", params.n);
-        eprintln!("  params.u:  {:#?}", params.u);
-        eprintln!("  params.w:  {:#?}", params.w);
-        let (domain, cs, _) = keygen::create_domain::<C, ConcreteCircuit>(params);
-
-        let mut version_byte = [0u8; 1];
-        reader.read_exact(&mut version_byte)?;
-        eprintln!("  version_byte: 0x{:02x}", version_byte[0]);
-
-        if 0x01 != version_byte[0] {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "unexpected version byte: 0x{:02x} (expected 0x01)",
-                    version_byte[0]
-                ),
-            ));
-        }
-
-        let mut num_fixed_columns_le_bytes = [0u8; 4];
-        reader.read_exact(&mut num_fixed_columns_le_bytes)?;
-        let num_fixed_columns = u32::from_le_bytes(num_fixed_columns_le_bytes);
-        eprintln!("  num_fixed_columns: {}", num_fixed_columns);
-
-        eprintln!(
-            "  Reading {} fixed column commitments...",
-            num_fixed_columns
-        );
-        let fixed_commitments: Vec<_> = (0..num_fixed_columns)
-            .map(|i| {
-                eprintln!(
-                    "    Reading fixed commitment {}/{}",
-                    i + 1,
-                    num_fixed_columns
-                );
-                C::read(reader)
-            })
-            .collect::<io::Result<_>>()?;
-
-        eprintln!("  Reading permutation verifying key...");
-        eprintln!("cs: {:#?}", cs);
-        let permutation = permutation::VerifyingKey::read(reader, &cs.permutation)?;
-
-        let mut num_selectors_le_bytes = [0u8; 4];
-        reader.read_exact(&mut num_selectors_le_bytes)?;
-        let num_selectors = u32::from_le_bytes(num_selectors_le_bytes);
-        eprintln!("  num_selectors: {}", num_selectors);
-        eprintln!("  cs.num_selectors: {}", cs.num_selectors);
-
-        if cs.num_selectors != num_selectors.try_into().unwrap() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "unexpected number of selectors",
-            ));
-        }
-        let selectors: Vec<Vec<bool>> = vec![vec![false; params.n as usize]; cs.num_selectors]
-            .into_iter()
-            .map(|mut selector| {
-                let mut selector_bytes = vec![0u8; (selector.len() + 7) / 8];
-                reader.read_exact(&mut selector_bytes)?;
-                for (bits, byte) in selector.chunks_mut(8).zip(selector_bytes) {
-                    unpack(byte, bits);
-                }
-                Ok(selector)
-            })
-            .collect::<io::Result<_>>()?;
-
-        let (cs, _) = cs.compress_selectors(selectors.clone());
-
-        eprintln!("✓ VerifyingKey::read completed successfully");
-        Ok(Self::from_parts(
-            domain,
-            fixed_commitments,
-            permutation,
-            cs,
-            selectors,
-        ))
-    }
-
-    /// Writes a verifying key to a vector of bytes.
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::<u8>::with_capacity(self.bytes_length());
-        self.write(&mut bytes)
-            .expect("Writing to vector should not fail");
-        bytes
-    }
-
-    /// Reads a verifying key from a slice of bytes.
-    pub fn from_bytes<ConcreteCircuit: Circuit<C::Scalar>>(
-        mut bytes: &[u8],
-        params: &Params<C>,
-    ) -> io::Result<Self> {
-        Self::read::<_, ConcreteCircuit>(&mut bytes, params)
+    /// clone cs: (s)
+    pub fn cs(&self) -> ConstraintSystem<C::Scalar> {
+        self.cs.clone()
     }
 
     /// Reads a verifying key from a buffer using a pre-built constraint system.
+    ///
+    /// This method enables circuit-agnostic verification by using a deserialized
+    /// ConstraintSystem instead of calling Circuit::configure().
+    // Reads a verifying key from a buffer using a pre-built constraint system.
     ///
     /// This method enables circuit-agnostic verification by using a deserialized
     /// ConstraintSystem instead of calling Circuit::configure().
@@ -276,7 +228,7 @@ where
             .collect::<io::Result<_>>()?;
 
         // Use the selectors from the VK (they contain the actual assignments)
-        let (cs, _) = cs.compress_selectors(vk_selectors.clone());
+        // let (cs, _) = cs.compress_selectors(vk_selectors.clone());
 
         eprintln!("✓ VerifyingKey::read_with_cs completed successfully");
         Ok(Self::from_parts(
@@ -296,20 +248,6 @@ where
         selectors: Vec<Vec<bool>>,
     ) -> io::Result<Self> {
         Self::read_with_cs(&mut bytes, params, cs, selectors)
-    }
-
-    /// Gets the total number of bytes in the serialization of `self`.
-    fn bytes_length(&self) -> usize {
-        1 + 4
-            + self.fixed_commitments.len() * C::default().to_bytes().as_ref().len()
-            + self.permutation.bytes_length()
-            + 4
-            + self.selectors.len()
-                * self
-                    .selectors
-                    .get(0)
-                    .map(|selector| (selector.len() + 7) / 8)
-                    .unwrap_or(0)
     }
 
     fn from_parts(
