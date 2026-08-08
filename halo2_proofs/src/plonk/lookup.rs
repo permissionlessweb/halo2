@@ -1,5 +1,7 @@
-use super::circuit::Expression;
-use ff::Field;
+use super::circuit::{Advice, Column, Expression, Fixed, Instance};
+use crate::poly::Rotation;
+use ff::{Field, PrimeField};
+use std::io;
 
 pub(crate) mod prover;
 pub(crate) mod verifier;
@@ -68,5 +70,66 @@ impl<F: Field> Argument<F> {
             // (1 - (l_last + l_blind)) z(X) (\theta^{m-1} a_0(X) + ... + a_{m-1}(X) + \beta) (\theta^{m-1} s_0(X) + ... + s_{m-1}(X) + \gamma)
             2 + input_degree + table_degree,
         )
+    }
+}
+
+// Lookup argument serialization for constraint system persistence
+impl<F: PrimeField> Argument<F> {
+    /// Write lookup argument to binary format.
+    ///
+    /// Format:
+    /// - [num_input_expressions: u16 LE]
+    /// - For each input: [expression: Expression]
+    /// - [num_table_expressions: u16 LE]
+    /// - For each table: [expression: Expression]
+    pub fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        // Write input expressions
+        writer.write_all(&(self.input_expressions.len() as u16).to_le_bytes())?;
+        for expr in &self.input_expressions {
+            expr.write(writer)?;
+        }
+
+        // Write table expressions
+        writer.write_all(&(self.table_expressions.len() as u16).to_le_bytes())?;
+        for expr in &self.table_expressions {
+            expr.write(writer)?;
+        }
+
+        Ok(())
+    }
+
+    /// Read lookup argument from binary format.
+    pub fn read<R: io::Read>(
+        reader: &mut R,
+        fixed_queries: &[(Column<Fixed>, Rotation)],
+        advice_queries: &[(Column<Advice>, Rotation)],
+        instance_queries: &[(Column<Instance>, Rotation)],
+    ) -> io::Result<Self> {
+        // Read input expressions
+        let mut num_inputs_bytes = [0u8; 2];
+        reader.read_exact(&mut num_inputs_bytes)?;
+        let num_inputs = u16::from_le_bytes(num_inputs_bytes) as usize;
+
+        let mut input_expressions = Vec::with_capacity(num_inputs);
+        for _ in 0..num_inputs {
+            let expr = Expression::read(reader, fixed_queries, advice_queries, instance_queries)?;
+            input_expressions.push(expr);
+        }
+
+        // Read table expressions
+        let mut num_tables_bytes = [0u8; 2];
+        reader.read_exact(&mut num_tables_bytes)?;
+        let num_tables = u16::from_le_bytes(num_tables_bytes) as usize;
+
+        let mut table_expressions = Vec::with_capacity(num_tables);
+        for _ in 0..num_tables {
+            let expr = Expression::read(reader, fixed_queries, advice_queries, instance_queries)?;
+            table_expressions.push(expr);
+        }
+
+        Ok(Argument {
+            input_expressions,
+            table_expressions,
+        })
     }
 }

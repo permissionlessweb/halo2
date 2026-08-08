@@ -4,6 +4,9 @@ use crate::{
     poly::{Coeff, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial},
 };
 
+use crate::helpers::CurveRead;
+use std::io;
+
 pub(crate) mod keygen;
 pub(crate) mod prover;
 pub(crate) mod verifier;
@@ -67,12 +70,104 @@ impl Argument {
     pub(crate) fn get_columns(&self) -> Vec<Column<Any>> {
         self.columns.clone()
     }
+
+    /// Write permutation argument to binary format.
+    ///
+    /// Format:
+    /// - [num_columns: u16 LE]
+    /// - For each column: [column_type: u8][column_index: u16 LE]
+    pub fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        writer.write_all(&(self.columns.len() as u16).to_le_bytes())?;
+        for column in &self.columns {
+            let (col_type, col_index) = match column.column_type() {
+                Any::Fixed => (0u8, column.index()),
+                Any::Advice => (1u8, column.index()),
+                Any::Instance => (2u8, column.index()),
+            };
+            writer.write_all(&[col_type])?;
+            writer.write_all(&(col_index as u16).to_le_bytes())?;
+        }
+        Ok(())
+    }
+
+    /// Read permutation argument from binary format.
+    pub fn read<R: io::Read>(reader: &mut R) -> io::Result<Self> {
+        let mut len_bytes = [0u8; 2];
+        reader.read_exact(&mut len_bytes)?;
+        let num_columns = u16::from_le_bytes(len_bytes) as usize;
+
+        let mut columns = Vec::with_capacity(num_columns);
+        for _ in 0..num_columns {
+            let mut col_type_byte = [0u8; 1];
+            reader.read_exact(&mut col_type_byte)?;
+            let mut col_index_bytes = [0u8; 2];
+            reader.read_exact(&mut col_index_bytes)?;
+            let col_index = u16::from_le_bytes(col_index_bytes) as usize;
+
+            let column: Column<Any> = match col_type_byte[0] {
+                0 => Column::new(col_index, Any::Fixed),
+                1 => Column::new(col_index, Any::Advice),
+                2 => Column::new(col_index, Any::Instance),
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("Invalid permutation column type: {}", col_type_byte[0]),
+                    ))
+                }
+            };
+            columns.push(column);
+        }
+
+        Ok(Argument { columns })
+    }
 }
 
 /// The verifying key for a single permutation argument.
 #[derive(Clone, Debug)]
 pub(crate) struct VerifyingKey<C: CurveAffine> {
     commitments: Vec<C>,
+}
+
+impl<C: CurveAffine> VerifyingKey<C> {
+    ///
+    /// ```text
+    /// +-------------------+-----------------------------+
+    /// | Field             | Size / Description          |
+    /// +-------------------+-----------------------------+
+    /// | num_commitments   | u32 LE                      |
+    /// | commitments       | num_commitments × C::G1     |
+    /// +-------------------+-----------------------------+
+    /// ```
+    pub(crate) fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        writer.write_all(&(u32::try_from(self.commitments.len()).unwrap()).to_le_bytes())?;
+        for commitment in &self.commitments {
+            writer.write_all(commitment.to_bytes().as_ref())?;
+        }
+        Ok(())
+    }
+    pub(crate) fn read<R: io::Read>(reader: &mut R, argument: &Argument) -> io::Result<Self> {
+        let mut num_commitments_le_bytes = [0u8; 4];
+        reader.read_exact(&mut num_commitments_le_bytes)?;
+        let num_commitments = u32::from_le_bytes(num_commitments_le_bytes);
+        let expected = num_commitments as usize;
+        if argument.columns.len() != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "unexpected number of column commitments: expected {}, got {}",
+                    expected,
+                    argument.columns.len()
+                ),
+            ));
+        }
+        let commitments: Vec<_> = (0..argument.columns.len())
+            .map(|_| C::read(reader))
+            .collect::<io::Result<_>>()?;
+        Ok(VerifyingKey { commitments })
+    }
+    pub(crate) fn bytes_length(&self) -> usize {
+        4 + self.commitments.len() * C::default().to_bytes().as_ref().len()
+    }
 }
 
 /// The proving key for a single permutation argument.

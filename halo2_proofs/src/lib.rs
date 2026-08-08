@@ -18,3 +18,6 @@ pub mod transcript;
 
 pub mod dev;
 mod helpers;
+
+/// | # of bytes dedicated to vk footers
+pub const COSMWASM_FOOTER_LENGTH: usize = 46;
