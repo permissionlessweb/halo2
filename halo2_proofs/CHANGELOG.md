@@ -6,6 +6,13 @@ and this project adheres to Rust's notion of
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Fixed
+- `VerifyingKey::read` / `from_bytes` restored. Selector assignments in the VK
+  blob are unpacked and passed through `ConstraintSystem::compress_selectors`
+  (same as keygen) so pinned CS / `transcript_repr` match the proving key.
+- CosmWasm Path A footer length is 80 bytes (`COSMWASM_FOOTER_LENGTH`).
+- `halo2_gadgets`: `multicore` feature forwards `halo2_proofs/multicore` so
+  host prove uses rayon `TryFoldAndReduce` (do not strip that cfg).
 
 ## [0.3.2] - 2025-12-04
 ### Added

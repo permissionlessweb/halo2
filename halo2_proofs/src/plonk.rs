@@ -138,6 +138,48 @@ where
         Ok(())
     }
 
+    /// Reads a verifying key from a buffer (circuit-typed; recomputes domain via configure).
+    ///
+    /// Selector assignments in the blob are **required**. After unpack they are passed
+    /// through [`ConstraintSystem::compress_selectors`] — the same step keygen uses —
+    /// so pinned CS / `transcript_repr` match the proving key.
+    pub fn read<R: io::Read, ConcreteCircuit: Circuit<C::Scalar>>(
+        reader: &mut R,
+        params: &Params<C>,
+    ) -> io::Result<Self> {
+        let (domain, cs, _) = keygen::create_domain::<C, ConcreteCircuit>(params);
+        Self::read_with_domain(reader, params, domain, cs)
+    }
+
+    /// Writes a verifying key to a vector of bytes.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::<u8>::with_capacity(self.bytes_length());
+        self.write(&mut bytes)
+            .expect("Writing to vector should not fail");
+        bytes
+    }
+
+    /// Reads a verifying key from a slice of bytes.
+    pub fn from_bytes<ConcreteCircuit: Circuit<C::Scalar>>(
+        mut bytes: &[u8],
+        params: &Params<C>,
+    ) -> io::Result<Self> {
+        Self::read::<_, ConcreteCircuit>(&mut bytes, params)
+    }
+
+    fn bytes_length(&self) -> usize {
+        1 + 4
+            + self.fixed_commitments.len() * C::default().to_bytes().as_ref().len()
+            + self.permutation.bytes_length()
+            + 4
+            + self.selectors.len()
+                * self
+                    .selectors
+                    .first()
+                    .map(|selector| (selector.len() + 7) / 8)
+                    .unwrap_or(0)
+    }
+
     /// clone cs: (s)
     pub fn cs(&self) -> ConstraintSystem<C::Scalar> {
         self.cs.clone()
@@ -145,29 +187,31 @@ where
 
     /// Reads a verifying key from a buffer using a pre-built constraint system.
     ///
-    /// This method enables circuit-agnostic verification by using a deserialized
-    /// ConstraintSystem instead of calling Circuit::configure().
-    // Reads a verifying key from a buffer using a pre-built constraint system.
-    ///
-    /// This method enables circuit-agnostic verification by using a deserialized
-    /// ConstraintSystem instead of calling Circuit::configure().
+    /// Selector matrix in the blob is unpacked and **compressed into `cs`**. Do not
+    /// skip that step: an uncompressed CS will not match keygen's pinned VK.
     pub fn read_with_cs<R: io::Read>(
         reader: &mut R,
         params: &Params<C>,
         cs: ConstraintSystem<C::Scalar>,
-        selectors: Vec<Vec<bool>>,
+        _selectors: Vec<Vec<bool>>,
     ) -> io::Result<Self> {
-        eprintln!("🔑 VerifyingKey::read_with_cs starting...");
+        let degree = cs.degree();
+        let domain = EvaluationDomain::new(degree as u32, params.k);
+        Self::read_with_domain(reader, params, domain, cs)
+    }
+
+    fn read_with_domain<R: io::Read>(
+        reader: &mut R,
+        params: &Params<C>,
+        domain: EvaluationDomain<C::Scalar>,
+        cs: ConstraintSystem<C::Scalar>,
+    ) -> io::Result<Self> {
+        eprintln!("🔑 VerifyingKey::read starting...");
         eprintln!("  params.k: {}", params.k);
         eprintln!("  cs.num_fixed_columns: {}", cs.num_fixed_columns);
         eprintln!("  cs.num_advice_columns: {}", cs.num_advice_columns);
         eprintln!("  cs.num_instance_columns: {}", cs.num_instance_columns);
         eprintln!("  cs.num_selectors: {}", cs.num_selectors);
-
-        // Create domain from params and CS degree
-        let degree = cs.degree();
-        eprintln!("  cs.degree(): {}", degree);
-        let domain = EvaluationDomain::new(degree as u32, params.k);
 
         // Read version byte
         let mut version_byte = [0u8; 1];
@@ -227,10 +271,10 @@ where
             })
             .collect::<io::Result<_>>()?;
 
-        // Use the selectors from the VK (they contain the actual assignments)
-        // let (cs, _) = cs.compress_selectors(vk_selectors.clone());
+        // Same as keygen: fold selector assignments into CS (fixed columns / substitutions).
+        let (cs, _) = cs.compress_selectors(vk_selectors.clone());
 
-        eprintln!("✓ VerifyingKey::read_with_cs completed successfully");
+        eprintln!("✓ VerifyingKey::read completed (selectors compressed)");
         Ok(Self::from_parts(
             domain,
             fixed_commitments,

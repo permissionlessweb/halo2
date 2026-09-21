@@ -53,6 +53,8 @@ pprof = { version = "0.8", features = ["criterion", "flamegraph"] } # MSRV 1.56
 bench = false
 
 [features]
+# Host prove: enable with `halo2_proofs/multicore` (rayon / TryFoldAndReduce).
+multicore = ["halo2_proofs/multicore"]
 test-dev-graph = [
     "halo2_proofs/dev-graph",
     "plotters",
